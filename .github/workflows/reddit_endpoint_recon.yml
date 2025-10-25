@@ -1,4 +1,4 @@
-name: Recon Endpoint Monitor
+name: Reddit Endpoint Monitor
 
 on:
   schedule:
@@ -18,8 +18,7 @@ jobs:
   recon:
     runs-on: ubuntu-latest
     env:
-      # dispatch-time domain override (or default)
-      DOMAIN: ${{ github.event.inputs.domain || 'example.com' }}
+      DOMAIN: ${{ github.event.inputs.domain || 'reddit.com' }}
 
     steps:
       - name: Checkout repository
@@ -269,7 +268,7 @@ jobs:
       - name: Notify via webhook if changes detected (optional)
         if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0'
         env:
-          WEBHOOK_URL: ${{ secrets.RECON_WEBHOOK }}  # set this secret in repo Settings -> Secrets
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}  # set this secret in repo Settings -> Secrets
         run: |
           set -euo pipefail
           NEW=$(cat results/$DOMAIN/new_endpoints.txt | wc -l || echo 0)
