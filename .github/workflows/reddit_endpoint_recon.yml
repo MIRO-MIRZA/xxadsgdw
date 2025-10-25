@@ -1,4 +1,4 @@
-name: Reddit Endpoint Monitor
+name: Recon Endpoint Monitor
 
 on:
   schedule:
@@ -9,7 +9,7 @@ on:
       domain:
         description: 'Target domain to scan'
         required: true
-        default: 'example.com'
+        default: 'reddit.com'
 
 permissions:
   contents: write
@@ -226,7 +226,7 @@ jobs:
       - name: Notify via webhook if changes detected (optional)
         if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0'
         env:
-          WEBHOOK_URL: ${{ secrets.RECON_WEBHOOK }}  # set this secret in repo settings
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}  # set this secret in repo settings
         run: |
           set -euo pipefail
           NEW=$(cat results/$DOMAIN/new_endpoints.txt | wc -l || echo 0)
