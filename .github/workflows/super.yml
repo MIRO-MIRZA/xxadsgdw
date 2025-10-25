@@ -61,6 +61,33 @@ jobs:
           path: results/${{ env.DOMAIN }}/subdomains.txt
           retention-days: 1
 
+      - name: Notify subdomain discovery completion
+        env:
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "Subdomain Discovery Completed" \
+            --arg domain "$DOMAIN" \
+            --arg count "$SUBDOMAINS_COUNT" \
+            --arg job_url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
+              "embeds": [{
+                "title": $title,
+                "color": 5814783,
+                "description": "Subdomain discovery completed successfully!",
+                "fields": [
+                  {"name":"Domain","value":$domain,"inline":true},
+                  {"name":"Subdomains Found","value":$count,"inline":true},
+                  {"name":"Job Details","value":"[View Job]('" + $job_url + "')","inline":false}
+                ],
+                "footer": {"text":"Bug Bounty Hunter Suite"}
+              }]
+            }')
+          
+          if [ -n "${WEBHOOK_URL:-}" ]; then
+            curl -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL" || true
+          fi
+
   # Job 2: Directory Bruteforcing with Gobuster (Fixed)
   gobuster-scan:
     runs-on: ubuntu-latest
@@ -123,6 +150,10 @@ jobs:
           echo "hidden" >> wordlists/basic.txt
           echo "secret" >> wordlists/basic.txt
           echo "internal" >> wordlists/basic.txt
+          echo "admin.php" >> wordlists/basic.txt
+          echo "login.php" >> wordlists/basic.txt
+          echo "config.php" >> wordlists/basic.txt
+          echo "database.php" >> wordlists/basic.txt
           echo "backup.sql" >> wordlists/basic.txt
           echo "dump.sql" >> wordlists/basic.txt
           echo ".env" >> wordlists/basic.txt
@@ -140,7 +171,6 @@ jobs:
           ls -la SecLists/Discovery/Web-Content/ 2>/dev/null || echo "[!] SecLists not found"
           ls -la wordlists/ 2>/dev/null || echo "[!] Custom wordlists not found"
 
-          
       - name: Test target accessibility
         run: |
           echo "[*] Testing target accessibility for $DOMAIN..."
@@ -374,6 +404,33 @@ jobs:
           path: results/${{ env.DOMAIN }}/combined/gobuster-results.txt
           retention-days: 1
 
+      - name: Notify Gobuster scan completion
+        env:
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "Gobuster Scan Completed" \
+            --arg domain "$DOMAIN" \
+            --arg count "$GOBUSTER_COUNT" \
+            --arg job_url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
+              "embeds": [{
+                "title": $title,
+                "color": 5814783,
+                "description": "Directory bruteforcing with Gobuster completed!",
+                "fields": [
+                  {"name":"Domain","value":$domain,"inline":true},
+                  {"name":"Endpoints Found","value":$count,"inline":true},
+                  {"name":"Job Details","value":"[View Job]('" + $job_url + "')","inline":false}
+                ],
+                "footer": {"text":"Bug Bounty Hunter Suite"}
+              }]
+            }')
+          
+          if [ -n "${WEBHOOK_URL:-}" ]; then
+            curl -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL" || true
+          fi
+
   # Job 3: Directory Bruteforcing with Dirsearch
   dirsearch-scan:
     runs-on: ubuntu-latest
@@ -441,6 +498,33 @@ jobs:
           name: dirsearch-results-${{ env.DOMAIN }}
           path: results/${{ env.DOMAIN }}/combined/dirsearch-results.txt
           retention-days: 1
+
+      - name: Notify Dirsearch scan completion
+        env:
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "Dirsearch Scan Completed" \
+            --arg domain "$DOMAIN" \
+            --arg count "$DIRSEARCH_COUNT" \
+            --arg job_url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
+              "embeds": [{
+                "title": $title,
+                "color": 5814783,
+                "description": "Directory bruteforcing with Dirsearch completed!",
+                "fields": [
+                  {"name":"Domain","value":$domain,"inline":true},
+                  {"name":"Endpoints Found","value":$count,"inline":true},
+                  {"name":"Job Details","value":"[View Job]('" + $job_url + "')","inline":false}
+                ],
+                "footer": {"text":"Bug Bounty Hunter Suite"}
+              }]
+            }')
+          
+          if [ -n "${WEBHOOK_URL:-}" ]; then
+            curl -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL" || true
+          fi
 
   # Job 4: JS File Enumeration and Analysis
   js-analysis:
@@ -557,6 +641,35 @@ jobs:
             results/${{ env.DOMAIN }}/js/combined/js-secrets.txt
           retention-days: 1
 
+      - name: Notify JS analysis completion
+        env:
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg title "JS Analysis Completed" \
+            --arg domain "$DOMAIN" \
+            --arg files "$JS_FILES_COUNT" \
+            --arg secrets "$JS_SECRETS_COUNT" \
+            --arg job_url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
+              "embeds": [{
+                "title": $title,
+                "color": 5814783,
+                "description": "JavaScript file analysis completed!",
+                "fields": [
+                  {"name":"Domain","value":$domain,"inline":true},
+                  {"name":"JS Files Found","value":$files,"inline":true},
+                  {"name":"Potential Secrets","value":$secrets,"inline":true},
+                  {"name":"Job Details","value":"[View Job]('" + $job_url + "')","inline":false}
+                ],
+                "footer": {"text":"Bug Bounty Hunter Suite"}
+              }]
+            }')
+          
+          if [ -n "${WEBHOOK_URL:-}" ]; then
+            curl -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL" || true
+          fi
+
   # Job 5: Combine and Analyze Results
   combine-results:
     runs-on: ubuntu-latest
@@ -654,48 +767,7 @@ jobs:
             results/${{ env.DOMAIN }}/final/
           retention-days: 7
 
-      - name: Commit scan results to repository
-        run: |
-          mkdir -p scan-results/$DOMAIN
-          cp -r results/$DOMAIN/final/* scan-results/$DOMAIN/
-          
-          # Create a summary markdown file
-          cat > scan-results/$DOMAIN/README.md << 'EOF'
-# Bug Bounty Scan Results for $DOMAIN
-    
-**Scan Date:** $(date)
-**Run ID:** ${{ github.run_id }}
-    
-## Summary:
-- Total endpoints found: $TOTAL_ENDPOINTS
-- New endpoints: $NEW_COUNT
-- Removed endpoints: $REMOVED_COUNT
-- Sensitive files: $SENSITIVE_FILES_COUNT
-- Potential secrets: $TOTAL_SECRETS
-    
-## Files:
-- `all-directories.txt` - All discovered directories and endpoints
-- `sensitive-files.txt` - Potentially sensitive files
-- `all-secrets.txt` - Potential secrets found
-- `new-endpoints.txt` - New endpoints since last scan
-- `removed-endpoints.txt` - Endpoints removed since last scan
-    
-## Quick Access:
-[View Raw Results](https://github.com/${{ github.repository }}/tree/main/scan-results/$DOMAIN)
-EOF
-          
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add scan-results/$DOMAIN/ || true
-          if git diff --staged --quiet; then
-            echo "[*] No scan results to commit."
-          else
-            git commit -m "feat(scan): add scan results for $DOMAIN - ${{ github.run_id }}"
-            git push origin HEAD:main || echo "[!] Push failed"
-          fi
-
-      - name: Notify via webhook with direct links
-        if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0' || env.SENSITIVE_FILES_COUNT != '0' || env.TOTAL_SECRETS != '0'
+      - name: Notify final results completion
         env:
           WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
         run: |
@@ -706,28 +778,27 @@ EOF
           
           # Create direct links to the artifacts
           ARTIFACT_LINK="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          REPORT_LINK="https://github.com/${{ github.repository }}/tree/main/scan-results/$DOMAIN"
           
           PAYLOAD=$(jq -n \
-            --arg title "Bug Bounty Scan Results for $DOMAIN" \
+            --arg title "Bug Bounty Scan Completed" \
+            --arg domain "$DOMAIN" \
             --arg new_count "$NEW" \
             --arg removed_count "$REMOVED" \
             --arg sensitive_count "$SENSITIVE" \
             --arg secrets_count "$SECRETS" \
             --arg artifact_link "$ARTIFACT_LINK" \
-            --arg report_link "$REPORT_LINK" \
             '{
               "embeds": [{
                 "title": $title,
-                "color": 16753920,
-                "description": "Scan completed with findings!",
+                "color": 5814783,
+                "description": "Full bug bounty scan completed with findings!",
                 "fields": [
+                  {"name":"Domain","value":$domain,"inline":true},
                   {"name":"New endpoints","value":$new_count,"inline":true},
                   {"name":"Removed endpoints","value":$removed_count,"inline":true},
                   {"name":"Sensitive files","value":$sensitive_count,"inline":true},
                   {"name":"Potential secrets","value":$secrets_count,"inline":true},
-                  {"name":"📊 View Full Results","value":"[Download Artifacts]('" + $artifact_link + "')","inline":false},
-                  {"name":"📄 View Report","value":"[HTML Report]('" + $report_link + "')","inline":false}
+                  {"name":"📊 View Full Results","value":"[Download Artifacts]('" + $artifact_link + "')","inline":false}
                 ],
                 "footer": {"text":"Bug Bounty Hunter Suite"}
               }]
@@ -735,6 +806,4 @@ EOF
           
           if [ -n "${WEBHOOK_URL:-}" ]; then
             curl -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL" || true
-          else
-            echo "[!] No WEBHOOK_URL secret configured; skipping notification."
           fi
