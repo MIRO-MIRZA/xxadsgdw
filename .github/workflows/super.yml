@@ -100,45 +100,45 @@ jobs:
           
           # Create a custom wordlist as backup
           mkdir -p wordlists
-          cat > wordlists/basic.txt << EOF
-    admin
-    test
-    api
-    backup
-    config
-    logs
-    tmp
-    old
-    dev
-    staging
-    js
-    css
-    assets
-    static
-    images
-    uploads
-    files
-    downloads
-    private
-    secure
-    hidden
-    secret
-    internal
-    admin.php
-    login.php
-    config.php
-    database.php
-    backup.sql
-    dump.sql
-    .env
-    .git
-    .svn
-    .htaccess
-    .htpasswd
-    web.config
-    robots.txt
-    sitemap.xml
-    EOF
+          cat > wordlists/basic.txt << 'EOF'
+admin
+test
+api
+backup
+config
+logs
+tmp
+old
+dev
+staging
+js
+css
+assets
+static
+images
+uploads
+files
+downloads
+private
+secure
+hidden
+secret
+internal
+admin.php
+login.php
+config.php
+database.php
+backup.sql
+dump.sql
+.env
+.git
+.svn
+.htaccess
+.htpasswd
+web.config
+robots.txt
+sitemap.xml
+EOF
           
           # Check available wordlists
           echo "[*] Available wordlists:"
@@ -665,29 +665,29 @@ jobs:
           cp -r results/$DOMAIN/final/* scan-results/$DOMAIN/
           
           # Create a summary markdown file
-          cat > scan-results/$DOMAIN/README.md << EOF
-    # Bug Bounty Scan Results for $DOMAIN
+          cat > scan-results/$DOMAIN/README.md << 'EOF'
+# Bug Bounty Scan Results for $DOMAIN
     
-    **Scan Date:** $(date)
-    **Run ID:** ${{ github.run_id }}
+**Scan Date:** $(date)
+**Run ID:** ${{ github.run_id }}
     
-    ## Summary:
-    - Total endpoints found: $TOTAL_ENDPOINTS
-    - New endpoints: $NEW_COUNT
-    - Removed endpoints: $REMOVED_COUNT
-    - Sensitive files: $SENSITIVE_FILES_COUNT
-    - Potential secrets: $TOTAL_SECRETS
+## Summary:
+- Total endpoints found: $TOTAL_ENDPOINTS
+- New endpoints: $NEW_COUNT
+- Removed endpoints: $REMOVED_COUNT
+- Sensitive files: $SENSITIVE_FILES_COUNT
+- Potential secrets: $TOTAL_SECRETS
     
-    ## Files:
-    - \`all-directories.txt\` - All discovered directories and endpoints
-    - \`sensitive-files.txt\` - Potentially sensitive files
-    - \`all-secrets.txt\` - Potential secrets found
-    - \`new-endpoints.txt\` - New endpoints since last scan
-    - \`removed-endpoints.txt\` - Endpoints removed since last scan
+## Files:
+- `all-directories.txt` - All discovered directories and endpoints
+- `sensitive-files.txt` - Potentially sensitive files
+- `all-secrets.txt` - Potential secrets found
+- `new-endpoints.txt` - New endpoints since last scan
+- `removed-endpoints.txt` - Endpoints removed since last scan
     
-    ## Quick Access:
-    [View Raw Results](https://github.com/${{ github.repository }}/tree/main/scan-results/$DOMAIN)
-    EOF
+## Quick Access:
+[View Raw Results](https://github.com/${{ github.repository }}/tree/main/scan-results/$DOMAIN)
+EOF
           
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
