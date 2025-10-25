@@ -100,45 +100,39 @@ jobs:
           
           # Create a custom wordlist as backup
           mkdir -p wordlists
-          cat > wordlists/basic.txt << 'EOF'
-admin
-test
-api
-backup
-config
-logs
-tmp
-old
-dev
-staging
-js
-css
-assets
-static
-images
-uploads
-files
-downloads
-private
-secure
-hidden
-secret
-internal
-admin.php
-login.php
-config.php
-database.php
-backup.sql
-dump.sql
-.env
-.git
-.svn
-.htaccess
-.htpasswd
-web.config
-robots.txt
-sitemap.xml
-EOF
+          echo "admin" > wordlists/basic.txt
+          echo "test" >> wordlists/basic.txt
+          echo "api" >> wordlists/basic.txt
+          echo "backup" >> wordlists/basic.txt
+          echo "config" >> wordlists/basic.txt
+          echo "logs" >> wordlists/basic.txt
+          echo "tmp" >> wordlists/basic.txt
+          echo "old" >> wordlists/basic.txt
+          echo "dev" >> wordlists/basic.txt
+          echo "staging" >> wordlists/basic.txt
+          echo "js" >> wordlists/basic.txt
+          echo "css" >> wordlists/basic.txt
+          echo "assets" >> wordlists/basic.txt
+          echo "static" >> wordlists/basic.txt
+          echo "images" >> wordlists/basic.txt
+          echo "uploads" >> wordlists/basic.txt
+          echo "files" >> wordlists/basic.txt
+          echo "downloads" >> wordlists/basic.txt
+          echo "private" >> wordlists/basic.txt
+          echo "secure" >> wordlists/basic.txt
+          echo "hidden" >> wordlists/basic.txt
+          echo "secret" >> wordlists/basic.txt
+          echo "internal" >> wordlists/basic.txt
+          echo "backup.sql" >> wordlists/basic.txt
+          echo "dump.sql" >> wordlists/basic.txt
+          echo ".env" >> wordlists/basic.txt
+          echo ".git" >> wordlists/basic.txt
+          echo ".svn" >> wordlists/basic.txt
+          echo ".htaccess" >> wordlists/basic.txt
+          echo ".htpasswd" >> wordlists/basic.txt
+          echo "web.config" >> wordlists/basic.txt
+          echo "robots.txt" >> wordlists/basic.txt
+          echo "sitemap.xml" >> wordlists/basic.txt
           
           # Check available wordlists
           echo "[*] Available wordlists:"
@@ -146,6 +140,7 @@ EOF
           ls -la SecLists/Discovery/Web-Content/ 2>/dev/null || echo "[!] SecLists not found"
           ls -la wordlists/ 2>/dev/null || echo "[!] Custom wordlists not found"
 
+          
       - name: Test target accessibility
         run: |
           echo "[*] Testing target accessibility for $DOMAIN..."
