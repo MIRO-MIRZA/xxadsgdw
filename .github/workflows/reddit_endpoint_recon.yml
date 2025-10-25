@@ -2,14 +2,14 @@ name: Reddit Endpoint Monitor
 
 on:
   schedule:
-    # Run every 6 hours
+    # run every 6 hours
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       domain:
         description: 'Target domain to scan'
         required: true
-        default: 'reddit.com'
+        default: 'example.com'
 
 permissions:
   contents: write
@@ -17,6 +17,9 @@ permissions:
 jobs:
   recon:
     runs-on: ubuntu-latest
+    env:
+      # you can override domain at dispatch time
+      DOMAIN: ${{ github.event.inputs.domain || 'example.com' }}
 
     steps:
       - name: Checkout repository
@@ -26,118 +29,238 @@ jobs:
           clean: true
           fetch-depth: 1
 
-      - name: Set up Go environment
+      - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
 
-      - name: Install Recon Tools
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install Recon Tools (subfinder, katana, gau, waybackurls, gf, httpx, trufflehog)
         run: |
+          set -euo pipefail
+          echo "Installing tools into $(go env GOPATH)/bin"
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
           go install -v github.com/lc/gau/v2/cmd/gau@latest
-          go install -v github.com/tomnomnom/waybackurls@latest
+          go install -v github.com/tomnomnom/waybackurls/cmd/waybackurls@latest
           go install -v github.com/tomnomnom/gf@latest
-          go install -v github.com/trufflesecurity/trufflehog@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          # trufflehog CLI main path (v3+) is under /v3/cmd/trufflehog
+          go install -v github.com/trufflesecurity/trufflehog/v3/cmd/trufflehog@latest
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+          ls -1 $(go env GOPATH)/bin || true
 
-      - name: Set scan domain
-        run: echo "DOMAIN=${{ github.event.inputs.domain || 'example.com' }}" >> $GITHUB_ENV
-
-      - name: Run Subfinder
+      - name: Prepare workspace
         run: |
+          set -euo pipefail
           mkdir -p results/$DOMAIN
-          subfinder -d "$DOMAIN" -silent -o results/$DOMAIN/subdomains.txt
-          sort -u results/$DOMAIN/subdomains.txt -o results/$DOMAIN/subdomains.txt
-          echo "Found $(wc -l < results/$DOMAIN/subdomains.txt) subdomains."
+          mkdir -p previous/$DOMAIN
+          mkdir -p tmp/$DOMAIN/bodies
 
-      - name: Enumerate Endpoints per Subdomain
+      - name: Run subfinder
         run: |
-          ENDPOINTS_FILE="results/$DOMAIN/endpoints.txt"
-          : > $ENDPOINTS_FILE
+          set -euo pipefail
+          echo "[*] Running subfinder for $DOMAIN"
+          subfinder -d "$DOMAIN" -silent -o results/$DOMAIN/subdomains.txt || true
+          sort -u results/$DOMAIN/subdomains.txt -o results/$DOMAIN/subdomains.txt || true
+          echo "SUBDOMAINS_COUNT=$(wc -l < results/$DOMAIN/subdomains.txt || echo 0)" >> $GITHUB_ENV
+
+      - name: Enumerate endpoints (gau + katana + waybackurls)
+        run: |
+          set -euo pipefail
+          ENDPOINTS="results/$DOMAIN/endpoints_raw.txt"
+          : > "$ENDPOINTS"
+
+          if [ ! -s results/$DOMAIN/subdomains.txt ]; then
+            echo "[!] No subdomains found; adding root domain for discovery"
+            echo "$DOMAIN" > results/$DOMAIN/subdomains.txt
+          fi
 
           while read -r sub; do
-            echo "[+] Enumerating endpoints for $sub"
-            {
-              gau "$sub" || true
-              katana -u "$sub" -silent || true
-              echo "$sub" | waybackurls || true
-            } | sort -u >> $ENDPOINTS_FILE
-          done < results/$DOMAIN/subdomains.txt
+            sub="$(echo "$sub" | tr -d '\r')"
+            echo "[+] Enumerating $sub"
 
-          echo "Collected $(wc -l < $ENDPOINTS_FILE) raw endpoints."
+            # gau (gathers urls from archival sources)
+            gau "$sub" || true
 
-      - name: Filter Interesting Files
+            # katana (fast spider)
+            katana -u "$sub" -silent -depth 2 -o - || true
+
+            # waybackurls
+            echo "$sub" | waybackurls || true
+
+          done < results/$DOMAIN/subdomains.txt | sort -u >> "$ENDPOINTS" || true
+
+          sort -u "$ENDPOINTS" -o "$ENDPOINTS" || true
+          echo "RAW_ENDPOINTS_COUNT=$(wc -l < $ENDPOINTS || echo 0)" >> $GITHUB_ENV
+          echo "[*] Collected $(wc -l < $ENDPOINTS || echo 0) raw endpoints."
+
+      - name: Filter interesting endpoints (extensions filter)
         run: |
+          set -euo pipefail
+          RAW="results/$DOMAIN/endpoints_raw.txt"
           FILTERED="results/$DOMAIN/interesting_endpoints.txt"
-          grep -Ei '\.(js|json|conf|config|env|git|svn|bak|old|zip|tar|gz|7z|sql|log|xml|yml|yaml|txt|backup|swp)$' results/$DOMAIN/endpoints.txt | sort -u > $FILTERED || true
-          echo "Found $(wc -l < $FILTERED) interesting endpoints."
+          : > "$FILTERED"
 
-      - name: Detect Secrets
+          # adjust / add extensions as you prefer:
+          egrep -i '\.(js|json|conf|config|env|git|svn|bak|old|zip|tar|gz|7z|sql|log|xml|yml|yaml|txt|backup|swp|env|php|aspx)$' "$RAW" | sort -u > "$FILTERED" || true
+
+          # also include endpoints that look like config paths or contain "backup" or "wp-config"
+          egrep -i 'backup|wp-config|.env|credentials|keys|key|secret|token' "$RAW" | sort -u >> "$FILTERED" || true
+
+          sort -u "$FILTERED" -o "$FILTERED" || true
+          echo "FILTERED_COUNT=$(wc -l < $FILTERED || echo 0)" >> $GITHUB_ENV
+          echo "[*] Filtered results: $(wc -l < $FILTERED || echo 0) interesting endpoints."
+
+      - name: Fetch endpoint bodies (best-effort) for secret scanning
         run: |
-          mkdir -p results/$DOMAIN/secrets
-          trufflehog filesystem --path results/$DOMAIN/interesting_endpoints.txt --json > results/$DOMAIN/secrets/trufflehog.json || true
-          echo "Secret scan completed."
+          set -euo pipefail
+          IN_FILE="results/$DOMAIN/interesting_endpoints.txt"
+          OUT_DIR="results/$DOMAIN/bodies"
+          mkdir -p "$OUT_DIR"
+          : > "$OUT_DIR/.fetch_manifest"
 
-      - name: Compare with Previous Results
-        run: |
-          mkdir -p previous/$DOMAIN
-          CURRENT="results/$DOMAIN/interesting_endpoints.txt"
-          PREVIOUS="previous/$DOMAIN/interesting_endpoints.txt"
-
-          if [ -f "$PREVIOUS" ]; then
-            comm -23 <(sort "$CURRENT") <(sort "$PREVIOUS") > results/$DOMAIN/new_endpoints.txt
-            comm -13 <(sort "$CURRENT") <(sort "$PREVIOUS") > results/$DOMAIN/removed_endpoints.txt
-            echo "NEW_COUNT=$(wc -l < results/$DOMAIN/new_endpoints.txt)" >> $GITHUB_ENV
-            echo "REMOVED_COUNT=$(wc -l < results/$DOMAIN/removed_endpoints.txt)" >> $GITHUB_ENV
-          else
-            echo "No previous endpoints found."
-            cp "$CURRENT" "$PREVIOUS"
-            echo "NEW_COUNT=0" >> $GITHUB_ENV
-            echo "REMOVED_COUNT=0" >> $GITHUB_ENV
+          if [ ! -s "$IN_FILE" ]; then
+            echo "[!] No interesting endpoints to fetch."
+            exit 0
           fi
 
-      - name: Upload Recon Results as Artifact
+          count=0
+          while read -r url; do
+            # simple sanitize and create filename by sha1 of url
+            safe=$(echo -n "$url" | sha1sum | awk '{print $1}')
+            fn="$OUT_DIR/$safe.txt"
+            # attempt to fetch (2s connection, 10s total) - ignore cert issues, follow redirects
+            if curl -L --max-time 10 --connect-timeout 4 -sS -k "$url" -o "$fn"; then
+              echo "$url|$fn" >> "$OUT_DIR/.fetch_manifest"
+              count=$((count+1))
+            else
+              # store a small record for failed fetches
+              echo "$url|FAILED" >> "$OUT_DIR/.fetch_manifest"
+            fi
+          done < "$IN_FILE"
+
+          echo "BODY_FILES_FETCHED=$count"
+          echo "BODY_FILES_FETCHED=$count" >> $GITHUB_ENV
+          echo "[*] Fetched $count endpoint bodies (best-effort)."
+
+      - name: Run trufflehog secret scan on fetched bodies
+        run: |
+          set -euo pipefail
+          BODIES_DIR="results/$DOMAIN/bodies"
+          OUT_JSON="results/$DOMAIN/secrets_trufflehog.json"
+          mkdir -p results/$DOMAIN
+          # Only run if there are files to scan
+          if [ -d "$BODIES_DIR" ] && [ "$(ls -A $BODIES_DIR | wc -l)" -gt 0 ]; then
+            echo "[*] Running trufflehog against $BODIES_DIR"
+            # trufflehog filesystem is used to scan a directory of files
+            trufflehog filesystem --path "$BODIES_DIR" --json > "$OUT_JSON" || true
+            echo "[*] Trufflehog results saved to $OUT_JSON"
+          else
+            echo "[*] No fetched bodies to scan."
+            : > "$OUT_JSON"
+          fi
+
+      - name: Compare filtered endpoints with previous run
+        id: compare
+        run: |
+          set -euo pipefail
+          CUR="results/$DOMAIN/interesting_endpoints.txt"
+          PREV="previous/$DOMAIN/interesting_endpoints.txt"
+          mkdir -p previous/$DOMAIN
+          : > results/$DOMAIN/new_endpoints.txt
+          : > results/$DOMAIN/removed_endpoints.txt
+
+          if [ -f "$PREV" ]; then
+            comm -23 <(sort "$CUR") <(sort "$PREV") > results/$DOMAIN/new_endpoints.txt || true
+            comm -13 <(sort "$CUR") <(sort "$PREV") > results/$DOMAIN/removed_endpoints.txt || true
+            echo "NEW_COUNT=$(wc -l < results/$DOMAIN/new_endpoints.txt || echo 0)" >> $GITHUB_ENV
+            echo "REMOVED_COUNT=$(wc -l < results/$DOMAIN/removed_endpoints.txt || echo 0)" >> $GITHUB_ENV
+          else
+            # first run: treat all as new
+            cp -f "$CUR" "$PREV" || true
+            echo "NEW_COUNT=$(wc -l < $CUR || echo 0)" >> $GITHUB_ENV
+            echo "REMOVED_COUNT=0" >> $GITHUB_ENV
+            # produce new_endpoints.txt for completeness
+            cp -f "$CUR" results/$DOMAIN/new_endpoints.txt || true
+          fi
+
+      - name: Save artifacts (results)
         uses: actions/upload-artifact@v4
         with:
-          name: recon-results-${{ github.event.inputs.domain }}
-          path: results/${{ github.event.inputs.domain }}/
+          name: recon-results-${{ env.DOMAIN }}-${{ github.run_id }}
+          path: |
+            results/${{ env.DOMAIN }}/
+            results/${{ env.DOMAIN }}/interesting_endpoints.txt
+            results/${{ env.DOMAIN }}/endpoints_raw.txt
+            results/${{ env.DOMAIN }}/new_endpoints.txt
+            results/${{ env.DOMAIN }}/removed_endpoints.txt
+            results/${{ env.DOMAIN }}/secrets_trufflehog.json
+            results/${{ env.DOMAIN }}/bodies/
+          retention-days: 7
 
-      - name: Commit new results
+      - name: Commit updated previous results (so next run can diff)
         run: |
+          set -euo pipefail
           mkdir -p previous/$DOMAIN
-          cp results/$DOMAIN/interesting_endpoints.txt previous/$DOMAIN/interesting_endpoints.txt
+          cp -f results/$DOMAIN/interesting_endpoints.txt previous/$DOMAIN/interesting_endpoints.txt || true
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add previous/$DOMAIN/interesting_endpoints.txt
+          git add previous/$DOMAIN/interesting_endpoints.txt || true
           if git diff --staged --quiet; then
-            echo "No new endpoints to commit."
+            echo "[*] No changes to previous endpoints to commit."
           else
-            git commit -m "Update endpoints for $DOMAIN"
-            git push origin main
+            git commit -m "chore(recon): update previous endpoints for $DOMAIN"
+            git push origin HEAD:main || echo "[!] Push failed (check permissions/branch)"
           fi
 
-      - name: Notify Changes (Optional - Discord/Webhook)
+      - name: Notify via webhook if changes detected (optional)
         if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0'
         env:
-          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
+          WEBHOOK_URL: ${{ secrets.RECON_WEBHOOK }}  # set this secret in repo settings
         run: |
+          set -euo pipefail
+          NEW=$(cat results/$DOMAIN/new_endpoints.txt | wc -l || echo 0)
+          REMOVED=$(cat results/$DOMAIN/removed_endpoints.txt | wc -l || echo 0)
+          # grab first few examples to include
+          NEW_EXAMPLES=$(head -n 10 results/$DOMAIN/new_endpoints.txt | sed ':a;N;$!ba;s/\n/\\n/g' || echo "None")
+          REMOVED_EXAMPLES=$(head -n 10 results/$DOMAIN/removed_endpoints.txt | sed ':a;N;$!ba;s/\n/\\n/g' || echo "None")
           PAYLOAD=$(jq -n \
-            --arg domain "$DOMAIN" \
-            --arg new "$NEW_COUNT" \
-            --arg removed "$REMOVED_COUNT" \
+            --arg title "Recon changes for $DOMAIN" \
+            --arg new_count "$NEW" \
+            --arg removed_count "$REMOVED" \
+            --arg new_examples "$NEW_EXAMPLES" \
+            --arg removed_examples "$REMOVED_EXAMPLES" \
             '{
               "embeds": [{
-                "title": ("Endpoint changes detected for " + $domain),
+                "title": $title,
                 "color": 16753920,
                 "fields": [
-                  {"name": "New Endpoints", "value": $new, "inline": true},
-                  {"name": "Removed Endpoints", "value": $removed, "inline": true}
+                  {"name":"New endpoints","value":$new_count,"inline":true},
+                  {"name":"Removed endpoints","value":$removed_count,"inline":true},
+                  {"name":"New examples (first 10)","value":$new_examples,"inline":false},
+                  {"name":"Removed examples (first 10)","value":$removed_examples,"inline":false}
                 ],
-                "footer": {"text": "Recon Endpoint Monitor"}
+                "footer": {"text":"Recon Endpoint Monitor"}
               }]
             }')
+          if [ -n "${WEBHOOK_URL:-}" ]; then
+            curl -H "Content-Type: application/json" -d "$PAYLOAD" "$WEBHOOK_URL" || true
+          else
+            echo "[!] No WEBHOOK_URL secret configured; skipping notification."
+          fi
 
-          curl -H "Content-Type: application/json" \
-            -d "$PAYLOAD" \
-            "$WEBHOOK_URL"
+      - name: Cleanup (optional)
+        if: always()
+        run: |
+          # keep results/ and previous/ for artifact and commit; remove tmp
+          rm -rf tmp || true
