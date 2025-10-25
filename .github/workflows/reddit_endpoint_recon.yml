@@ -1,0 +1,143 @@
+name: Reddit Endpoint Monitor
+
+on:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: 'Target domain to scan'
+        required: true
+        default: 'reddit.com'
+
+permissions:
+  contents: write
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          clean: true
+          fetch-depth: 1
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Install Recon Tools
+        run: |
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          go install -v github.com/tomnomnom/waybackurls@latest
+          go install -v github.com/tomnomnom/gf@latest
+          go install -v github.com/trufflesecurity/trufflehog@latest
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Set scan domain
+        run: echo "DOMAIN=${{ github.event.inputs.domain || 'example.com' }}" >> $GITHUB_ENV
+
+      - name: Run Subfinder
+        run: |
+          mkdir -p results/$DOMAIN
+          subfinder -d "$DOMAIN" -silent -o results/$DOMAIN/subdomains.txt
+          sort -u results/$DOMAIN/subdomains.txt -o results/$DOMAIN/subdomains.txt
+          echo "Found $(wc -l < results/$DOMAIN/subdomains.txt) subdomains."
+
+      - name: Enumerate Endpoints per Subdomain
+        run: |
+          ENDPOINTS_FILE="results/$DOMAIN/endpoints.txt"
+          : > $ENDPOINTS_FILE
+
+          while read -r sub; do
+            echo "[+] Enumerating endpoints for $sub"
+            {
+              gau "$sub" || true
+              katana -u "$sub" -silent || true
+              echo "$sub" | waybackurls || true
+            } | sort -u >> $ENDPOINTS_FILE
+          done < results/$DOMAIN/subdomains.txt
+
+          echo "Collected $(wc -l < $ENDPOINTS_FILE) raw endpoints."
+
+      - name: Filter Interesting Files
+        run: |
+          FILTERED="results/$DOMAIN/interesting_endpoints.txt"
+          grep -Ei '\.(js|json|conf|config|env|git|svn|bak|old|zip|tar|gz|7z|sql|log|xml|yml|yaml|txt|backup|swp)$' results/$DOMAIN/endpoints.txt | sort -u > $FILTERED || true
+          echo "Found $(wc -l < $FILTERED) interesting endpoints."
+
+      - name: Detect Secrets
+        run: |
+          mkdir -p results/$DOMAIN/secrets
+          trufflehog filesystem --path results/$DOMAIN/interesting_endpoints.txt --json > results/$DOMAIN/secrets/trufflehog.json || true
+          echo "Secret scan completed."
+
+      - name: Compare with Previous Results
+        run: |
+          mkdir -p previous/$DOMAIN
+          CURRENT="results/$DOMAIN/interesting_endpoints.txt"
+          PREVIOUS="previous/$DOMAIN/interesting_endpoints.txt"
+
+          if [ -f "$PREVIOUS" ]; then
+            comm -23 <(sort "$CURRENT") <(sort "$PREVIOUS") > results/$DOMAIN/new_endpoints.txt
+            comm -13 <(sort "$CURRENT") <(sort "$PREVIOUS") > results/$DOMAIN/removed_endpoints.txt
+            echo "NEW_COUNT=$(wc -l < results/$DOMAIN/new_endpoints.txt)" >> $GITHUB_ENV
+            echo "REMOVED_COUNT=$(wc -l < results/$DOMAIN/removed_endpoints.txt)" >> $GITHUB_ENV
+          else
+            echo "No previous endpoints found."
+            cp "$CURRENT" "$PREVIOUS"
+            echo "NEW_COUNT=0" >> $GITHUB_ENV
+            echo "REMOVED_COUNT=0" >> $GITHUB_ENV
+          fi
+
+      - name: Upload Recon Results as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-results-${{ github.event.inputs.domain }}
+          path: results/${{ github.event.inputs.domain }}/
+
+      - name: Commit new results
+        run: |
+          mkdir -p previous/$DOMAIN
+          cp results/$DOMAIN/interesting_endpoints.txt previous/$DOMAIN/interesting_endpoints.txt
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add previous/$DOMAIN/interesting_endpoints.txt
+          if git diff --staged --quiet; then
+            echo "No new endpoints to commit."
+          else
+            git commit -m "Update endpoints for $DOMAIN"
+            git push origin main
+          fi
+
+      - name: Notify Changes (Optional - Discord/Webhook)
+        if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0'
+        env:
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg domain "$DOMAIN" \
+            --arg new "$NEW_COUNT" \
+            --arg removed "$REMOVED_COUNT" \
+            '{
+              "embeds": [{
+                "title": ("Endpoint changes detected for " + $domain),
+                "color": 16753920,
+                "fields": [
+                  {"name": "New Endpoints", "value": $new, "inline": true},
+                  {"name": "Removed Endpoints", "value": $removed, "inline": true}
+                ],
+                "footer": {"text": "Recon Endpoint Monitor"}
+              }]
+            }')
+
+          curl -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$WEBHOOK_URL"
