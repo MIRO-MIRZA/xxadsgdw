@@ -61,7 +61,7 @@ jobs:
           path: results/${{ env.DOMAIN }}/subdomains.txt
           retention-days: 1
 
-  # Job 2: Directory Bruteforcing with Gobuster
+  # Job 2: Directory Bruteforcing with Gobuster (Fixed)
   gobuster-scan:
     runs-on: ubuntu-latest
     needs: subdomain-discovery
@@ -80,40 +80,249 @@ jobs:
           name: subdomains-${{ env.DOMAIN }}
           path: results/${{ env.DOMAIN }}/
 
-      - name: Install Gobuster
+      - name: Install Gobuster and wordlists
         run: |
+          echo "[*] Installing Gobuster and wordlists..."
           sudo apt-get update
           sudo apt-get install -y gobuster
+          
+          # Verify installation
+          gobuster version
+          
+          # Install wordlists
+          sudo apt-get install -y wordlist || echo "[!] System wordlists not available"
+          
+          # Download SecLists for better coverage
+          if [ ! -d "SecLists" ]; then
+            echo "[*] Downloading SecLists..."
+            git clone https://github.com/danielmiessler/SecLists.git --depth 1 || echo "[!] Failed to download SecLists"
+          fi
+          
+          # Create a custom wordlist as backup
+          mkdir -p wordlists
+          cat > wordlists/basic.txt << EOF
+    admin
+    test
+    api
+    backup
+    config
+    logs
+    tmp
+    old
+    dev
+    staging
+    js
+    css
+    assets
+    static
+    images
+    uploads
+    files
+    downloads
+    private
+    secure
+    hidden
+    secret
+    internal
+    admin.php
+    login.php
+    config.php
+    database.php
+    backup.sql
+    dump.sql
+    .env
+    .git
+    .svn
+    .htaccess
+    .htpasswd
+    web.config
+    robots.txt
+    sitemap.xml
+    EOF
+          
+          # Check available wordlists
+          echo "[*] Available wordlists:"
+          ls -la /usr/share/wordlists/ 2>/dev/null || echo "[!] System wordlists not found"
+          ls -la SecLists/Discovery/Web-Content/ 2>/dev/null || echo "[!] SecLists not found"
+          ls -la wordlists/ 2>/dev/null || echo "[!] Custom wordlists not found"
+
+      - name: Test target accessibility
+        run: |
+          echo "[*] Testing target accessibility for $DOMAIN..."
+          
+          # Test basic connectivity
+          echo "[*] Testing HTTP/HTTPS connectivity..."
+          timeout 10 curl -I -k -s https://$DOMAIN || echo "[!] HTTPS not accessible"
+          timeout 10 curl -I -s http://$DOMAIN || echo "[!] HTTP not accessible"
+          
+          # Test with a simple request
+          echo "[*] Testing simple request..."
+          timeout 10 curl -k -s https://$DOMAIN | head -5 || echo "[!] Request failed"
+          
+          # Check if we're being blocked
+          echo "[*] Checking for blocking..."
+          timeout 10 curl -I -k -s https://$DOMAIN | grep -i "cloudflare\|block\|forbidden\|rate limit" || echo "[!] No obvious blocking detected"
 
       - name: Prepare workspace
         run: |
           mkdir -p results/$DOMAIN/gobuster
           mkdir -p tmp/$DOMAIN
 
-      - name: Run Gobuster on main domain
+      - name: Run Gobuster on main domain with proper configuration
         run: |
           echo "[*] Running Gobuster on $DOMAIN"
-          gobuster dir -u https://$DOMAIN -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt \
-            -x php,asp,aspx,jsp,html,htm,js,json,txt,log,bak,backup,old,zip,tar,gz,sql,conf,config,yml,yaml,env \
-            -t 50 -r -e -k -o results/$DOMAIN/gobuster/main-domain.txt || true
+          
+          # Try different wordlists in order of preference
+          WORDLISTS=(
+            "SecLists/Discovery/Web-Content/common.txt"
+            "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
+            "wordlists/basic.txt"
+          )
+          
+          for wordlist in "${WORDLISTS[@]}"; do
+            if [ -f "$wordlist" ]; then
+              echo "[+] Using wordlist: $wordlist ($(wc -l < $wordlist) entries)"
+              
+              # Run with comprehensive flags
+              gobuster dir \
+                -u https://$DOMAIN \
+                -w "$wordlist" \
+                -x php,asp,aspx,jsp,html,htm,js,json,txt,log,bak,backup,old,zip,tar,gz,sql,conf,config,yml,yaml,env \
+                -t 30 \
+                -r \
+                -e \
+                -k \
+                --no-error \
+                --timeout 10 \
+                --expanded \
+                -v \
+                -o "results/$DOMAIN/gobuster/main-$(basename $wordlist .txt).txt" \
+                || echo "[!] Gobuster failed with $wordlist (exit code $?)"
+              
+              # Check if we got results
+              if [ -f "results/$DOMAIN/gobuster/main-$(basename $wordlist .txt).txt" ]; then
+                RESULTS_COUNT=$(wc -l < "results/$DOMAIN/gobuster/main-$(basename $wordlist .txt).txt")
+                echo "[*] Got $RESULTS_COUNT lines of output"
+                if [ "$RESULTS_COUNT" -gt 0 ]; then
+                  break  # Stop if we got results
+                fi
+              fi
+              
+              sleep 5  # Delay between wordlists
+            else
+              echo "[!] Wordlist not found: $wordlist"
+            fi
+          done
 
       - name: Run Gobuster on subdomains (top 10)
         run: |
           echo "[*] Running Gobuster on top 10 subdomains"
+          
+          # Use a smaller wordlist for subdomains to save time
+          WORDLIST="wordlists/basic.txt"
+          
+          if [ ! -f "$WORDLIST" ]; then
+            WORDLIST="SecLists/Discovery/Web-Content/common.txt"
+          fi
+          
+          if [ ! -f "$WORDLIST" ]; then
+            WORDLIST="/usr/share/wordlists/dirbuster/directory-list-2.3-small.txt"
+          fi
+          
+          if [ ! -f "$WORDLIST" ]; then
+            echo "[!] No suitable wordlist found for subdomains"
+            exit 1
+          fi
+          
+          echo "[+] Using wordlist for subdomains: $WORDLIST"
+          
           head -n 10 results/$DOMAIN/subdomains.txt | while read sub; do
             sub="$(echo "$sub" | tr -d '\r')"
             [ -z "$sub" ] && continue
             echo "[+] Scanning $sub"
-            gobuster dir -u https://$sub -w /usr/share/wordlists/dirbuster/directory-list-2.3-small.txt \
+            
+            gobuster dir \
+              -u https://$sub \
+              -w "$WORDLIST" \
               -x php,asp,aspx,jsp,html,htm,js,json,txt,log,bak,backup,old,zip,tar,gz,sql,conf,config,yml,yaml,env \
-              -t 30 -r -e -k -o results/$DOMAIN/gobuster/sub-${sub}.txt || true
+              -t 20 \
+              -r \
+              -e \
+              -k \
+              --no-error \
+              --timeout 10 \
+              --expanded \
+              -v \
+              -o "results/$DOMAIN/gobuster/sub-${sub}.txt" \
+              || echo "[!] Gobuster failed for $sub"
+            
+            # Add delay between subdomain scans
+            sleep 3
           done
 
-      - name: Combine Gobuster results
+      - name: Debug and collect all results
+        run: |
+          echo "[*] Debugging Gobuster execution..."
+          
+          # List all output files
+          echo "[*] Output files created:"
+          find results/$DOMAIN/gobuster -name "*.txt" -exec ls -la {} \; || echo "[!] No output files found"
+          
+          # Show content of all files
+          echo "[*] Content of all output files:"
+          for file in results/$DOMAIN/gobuster/*.txt; do
+            if [ -f "$file" ]; then
+              echo "=== $file ==="
+              cat "$file"
+              echo ""
+            fi
+          done
+          
+          # Check for any error patterns
+          echo "[*] Checking for error patterns..."
+          find results/$DOMAIN/gobuster -name "*.txt" -exec grep -l "error\|fail\|denied\|blocked\|forbidden" {} \; || echo "[!] No error patterns found"
+
+      - name: Combine Gobuster results with better parsing
         id: combine-gobuster
         run: |
+          echo "[*] Combining Gobuster results..."
           mkdir -p results/$DOMAIN/combined
-          cat results/$DOMAIN/gobuster/*.txt | grep -E "^https?://.+" | sort -u > results/$DOMAIN/combined/gobuster-results.txt || true
+          
+          # Create combined file
+          > results/$DOMAIN/combined/gobuster-results.txt
+          
+          # Process each output file
+          for file in results/$DOMAIN/gobuster/*.txt; do
+            if [ -f "$file" ] && [ -s "$file" ]; then
+              echo "[+] Processing $file"
+              
+              # Extract URLs (handle different output formats)
+              grep -E "^https?://.+" "$file" >> results/$DOMAIN/combined/gobuster-results.txt || true
+              
+              # Extract status codes and paths
+              grep -E "^[0-9]{3}" "$file" | awk '{print $2}' | while read path; do
+                if [ -n "$path" ]; then
+                  echo "https://$DOMAIN$path" >> results/$DOMAIN/combined/gobuster-results.txt
+                fi
+              done || true
+              
+              # Extract just paths and construct URLs
+              grep -vE "^https?://|^=|^$|Status:" "$file" | grep -E "^/[^ ]+" | while read path; do
+                if [ -n "$path" ]; then
+                  echo "https://$DOMAIN$path" >> results/$DOMAIN/combined/gobuster-results.txt
+                fi
+              done || true
+            fi
+          done
+          
+          # Sort and deduplicate
+          if [ -s "results/$DOMAIN/combined/gobuster-results.txt" ]; then
+            sort -u results/$DOMAIN/combined/gobuster-results.txt -o results/$DOMAIN/combined/gobuster-results.txt
+            echo "[*] Combined results created successfully"
+          else
+            echo "[!] No results to combine"
+            echo "# No results found" > results/$DOMAIN/combined/gobuster-results.txt
+          fi
           
           # Set output for other jobs
           GOBUSTER_RESULTS="results/$DOMAIN/combined/gobuster-results.txt"
@@ -121,6 +330,47 @@ jobs:
           
           echo "GOBUSTER_COUNT=$(wc -l < results/$DOMAIN/combined/gobuster-results.txt || echo 0)" >> $GITHUB_ENV
           echo "[*] Gobuster found $(wc -l < results/$DOMAIN/combined/gobuster-results.txt || echo 0) endpoints"
+          
+          # Show sample results
+          echo "=== Sample results ==="
+          head -10 results/$DOMAIN/combined/gobuster-results.txt || echo "No results to show"
+
+      - name: Fallback to manual directory check if needed
+        if: env.GOBUSTER_COUNT == '0'
+        run: |
+          echo "[*] Gobuster found no results, trying manual directory check..."
+          
+          # Create a manual results file
+          > results/$DOMAIN/combined/gobuster-results.txt
+          
+          # Common directories to check
+          DIRS=(
+            "/admin"
+            "/api"
+            "/backup"
+            "/config"
+            "/logs"
+            "/test"
+            "/dev"
+            "/staging"
+            "/old"
+            "/tmp"
+            "/.git"
+            "/.env"
+            "/.svn"
+            "/robots.txt"
+            "/sitemap.xml"
+          )
+          
+          for dir in "${DIRS[@]}"; do
+            echo "[*] Checking https://$DOMAIN$dir"
+            if timeout 10 curl -k -s -I "https://$DOMAIN$dir" | grep -E "HTTP/[0-9.]+ [23]"; then
+              echo "https://$DOMAIN$dir" >> results/$DOMAIN/combined/gobuster-results.txt
+            fi
+          done
+          
+          echo "MANUAL_COUNT=$(wc -l < results/$DOMAIN/combined/gobuster-results.txt || echo 0)" >> $GITHUB_ENV
+          echo "[*] Manual check found $(wc -l < results/$DOMAIN/combined/gobuster-results.txt || echo 0) endpoints"
 
       - name: Upload gobuster artifact
         uses: actions/upload-artifact@v4
@@ -409,22 +659,48 @@ jobs:
             results/${{ env.DOMAIN }}/final/
           retention-days: 7
 
-      - name: Commit updated previous results
+      - name: Commit scan results to repository
         run: |
-          mkdir -p previous/$DOMAIN
-          cp -f results/$DOMAIN/final/all-directories.txt previous/$DOMAIN/all-directories.txt || true
+          mkdir -p scan-results/$DOMAIN
+          cp -r results/$DOMAIN/final/* scan-results/$DOMAIN/
+          
+          # Create a summary markdown file
+          cat > scan-results/$DOMAIN/README.md << EOF
+    # Bug Bounty Scan Results for $DOMAIN
+    
+    **Scan Date:** $(date)
+    **Run ID:** ${{ github.run_id }}
+    
+    ## Summary:
+    - Total endpoints found: $TOTAL_ENDPOINTS
+    - New endpoints: $NEW_COUNT
+    - Removed endpoints: $REMOVED_COUNT
+    - Sensitive files: $SENSITIVE_FILES_COUNT
+    - Potential secrets: $TOTAL_SECRETS
+    
+    ## Files:
+    - \`all-directories.txt\` - All discovered directories and endpoints
+    - \`sensitive-files.txt\` - Potentially sensitive files
+    - \`all-secrets.txt\` - Potential secrets found
+    - \`new-endpoints.txt\` - New endpoints since last scan
+    - \`removed-endpoints.txt\` - Endpoints removed since last scan
+    
+    ## Quick Access:
+    [View Raw Results](https://github.com/${{ github.repository }}/tree/main/scan-results/$DOMAIN)
+    EOF
+          
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add previous/$DOMAIN/all-directories.txt || true
+          git add scan-results/$DOMAIN/ || true
           if git diff --staged --quiet; then
-            echo "[*] No changes to previous endpoints to commit."
+            echo "[*] No scan results to commit."
           else
-            git commit -m "chore(recon): update previous endpoints for $DOMAIN"
+            git commit -m "feat(scan): add scan results for $DOMAIN - ${{ github.run_id }}"
             git push origin HEAD:main || echo "[!] Push failed"
           fi
 
-      - name: Notify via webhook if changes detected
-        if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0'
+      - name: Notify via webhook with direct links
+        if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0' || env.SENSITIVE_FILES_COUNT != '0' || env.TOTAL_SECRETS != '0'
         env:
           WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
         run: |
@@ -433,9 +709,9 @@ jobs:
           SENSITIVE=$(cat results/$DOMAIN/final/sensitive-files.txt | wc -l || echo 0)
           SECRETS=$(cat results/$DOMAIN/final/all-secrets.txt | wc -l || echo 0)
           
-          NEW_EXAMPLES=$(head -n 10 results/$DOMAIN/final/new-endpoints.txt | sed ':a;N;$!ba;s/\n/\\n/g' || echo "None")
-          SENSITIVE_EXAMPLES=$(head -n 10 results/$DOMAIN/final/sensitive-files.txt | sed ':a;N;$!ba;s/\n/\\n/g' || echo "None")
-          SECRETS_EXAMPLES=$(head -n 10 results/$DOMAIN/final/all-secrets.txt | sed ':a;N;$!ba;s/\n/\\n/g' || echo "None")
+          # Create direct links to the artifacts
+          ARTIFACT_LINK="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          REPORT_LINK="https://github.com/${{ github.repository }}/tree/main/scan-results/$DOMAIN"
           
           PAYLOAD=$(jq -n \
             --arg title "Bug Bounty Scan Results for $DOMAIN" \
@@ -443,21 +719,20 @@ jobs:
             --arg removed_count "$REMOVED" \
             --arg sensitive_count "$SENSITIVE" \
             --arg secrets_count "$SECRETS" \
-            --arg new_examples "$NEW_EXAMPLES" \
-            --arg sensitive_examples "$SENSITIVE_EXAMPLES" \
-            --arg secrets_examples "$SECRETS_EXAMPLES" \
+            --arg artifact_link "$ARTIFACT_LINK" \
+            --arg report_link "$REPORT_LINK" \
             '{
               "embeds": [{
                 "title": $title,
                 "color": 16753920,
+                "description": "Scan completed with findings!",
                 "fields": [
                   {"name":"New endpoints","value":$new_count,"inline":true},
                   {"name":"Removed endpoints","value":$removed_count,"inline":true},
                   {"name":"Sensitive files","value":$sensitive_count,"inline":true},
                   {"name":"Potential secrets","value":$secrets_count,"inline":true},
-                  {"name":"New examples (first 10)","value":$new_examples,"inline":false},
-                  {"name":"Sensitive files (first 10)","value":$sensitive_examples,"inline":false},
-                  {"name":"Potential secrets (first 10)","value":$secrets_examples,"inline":false}
+                  {"name":"📊 View Full Results","value":"[Download Artifacts]('" + $artifact_link + "')","inline":false},
+                  {"name":"📄 View Report","value":"[HTML Report]('" + $report_link + "')","inline":false}
                 ],
                 "footer": {"text":"Bug Bounty Hunter Suite"}
               }]
