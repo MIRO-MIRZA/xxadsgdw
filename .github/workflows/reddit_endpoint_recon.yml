@@ -18,7 +18,6 @@ jobs:
   recon:
     runs-on: ubuntu-latest
     env:
-      # you can override domain at dispatch time
       DOMAIN: ${{ github.event.inputs.domain || 'example.com' }}
 
     steps:
@@ -48,14 +47,15 @@ jobs:
         run: |
           set -euo pipefail
           echo "Installing tools into $(go env GOPATH)/bin"
+
           go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install -v github.com/projectdiscovery/katana/cmd/katana@latest
           go install -v github.com/lc/gau/v2/cmd/gau@latest
-          go install -v github.com/tomnomnom/waybackurls/cmd/waybackurls@latest
+          go install -v github.com/tomnomnom/waybackurls@latest
           go install -v github.com/tomnomnom/gf@latest
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-          # trufflehog CLI main path (v3+) is under /v3/cmd/trufflehog
           go install -v github.com/trufflesecurity/trufflehog/v3/cmd/trufflehog@latest
+
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
           ls -1 $(go env GOPATH)/bin || true
 
@@ -89,13 +89,8 @@ jobs:
             sub="$(echo "$sub" | tr -d '\r')"
             echo "[+] Enumerating $sub"
 
-            # gau (gathers urls from archival sources)
             gau "$sub" || true
-
-            # katana (fast spider)
             katana -u "$sub" -silent -depth 2 -o - || true
-
-            # waybackurls
             echo "$sub" | waybackurls || true
 
           done < results/$DOMAIN/subdomains.txt | sort -u >> "$ENDPOINTS" || true
@@ -111,10 +106,7 @@ jobs:
           FILTERED="results/$DOMAIN/interesting_endpoints.txt"
           : > "$FILTERED"
 
-          # adjust / add extensions as you prefer:
-          egrep -i '\.(js|json|conf|config|env|git|svn|bak|old|zip|tar|gz|7z|sql|log|xml|yml|yaml|txt|backup|swp|env|php|aspx)$' "$RAW" | sort -u > "$FILTERED" || true
-
-          # also include endpoints that look like config paths or contain "backup" or "wp-config"
+          egrep -i '\.(js|json|conf|config|env|git|svn|bak|old|zip|tar|gz|7z|sql|log|xml|yml|yaml|txt|backup|swp|php|aspx)$' "$RAW" | sort -u > "$FILTERED" || true
           egrep -i 'backup|wp-config|.env|credentials|keys|key|secret|token' "$RAW" | sort -u >> "$FILTERED" || true
 
           sort -u "$FILTERED" -o "$FILTERED" || true
@@ -136,22 +128,18 @@ jobs:
 
           count=0
           while read -r url; do
-            # simple sanitize and create filename by sha1 of url
             safe=$(echo -n "$url" | sha1sum | awk '{print $1}')
             fn="$OUT_DIR/$safe.txt"
-            # attempt to fetch (2s connection, 10s total) - ignore cert issues, follow redirects
             if curl -L --max-time 10 --connect-timeout 4 -sS -k "$url" -o "$fn"; then
               echo "$url|$fn" >> "$OUT_DIR/.fetch_manifest"
               count=$((count+1))
             else
-              # store a small record for failed fetches
               echo "$url|FAILED" >> "$OUT_DIR/.fetch_manifest"
             fi
           done < "$IN_FILE"
 
-          echo "BODY_FILES_FETCHED=$count"
           echo "BODY_FILES_FETCHED=$count" >> $GITHUB_ENV
-          echo "[*] Fetched $count endpoint bodies (best-effort)."
+          echo "[*] Fetched $count endpoint bodies."
 
       - name: Run trufflehog secret scan on fetched bodies
         run: |
@@ -159,10 +147,8 @@ jobs:
           BODIES_DIR="results/$DOMAIN/bodies"
           OUT_JSON="results/$DOMAIN/secrets_trufflehog.json"
           mkdir -p results/$DOMAIN
-          # Only run if there are files to scan
           if [ -d "$BODIES_DIR" ] && [ "$(ls -A $BODIES_DIR | wc -l)" -gt 0 ]; then
             echo "[*] Running trufflehog against $BODIES_DIR"
-            # trufflehog filesystem is used to scan a directory of files
             trufflehog filesystem --path "$BODIES_DIR" --json > "$OUT_JSON" || true
             echo "[*] Trufflehog results saved to $OUT_JSON"
           else
@@ -186,11 +172,9 @@ jobs:
             echo "NEW_COUNT=$(wc -l < results/$DOMAIN/new_endpoints.txt || echo 0)" >> $GITHUB_ENV
             echo "REMOVED_COUNT=$(wc -l < results/$DOMAIN/removed_endpoints.txt || echo 0)" >> $GITHUB_ENV
           else
-            # first run: treat all as new
             cp -f "$CUR" "$PREV" || true
             echo "NEW_COUNT=$(wc -l < $CUR || echo 0)" >> $GITHUB_ENV
             echo "REMOVED_COUNT=0" >> $GITHUB_ENV
-            # produce new_endpoints.txt for completeness
             cp -f "$CUR" results/$DOMAIN/new_endpoints.txt || true
           fi
 
@@ -226,12 +210,11 @@ jobs:
       - name: Notify via webhook if changes detected (optional)
         if: env.NEW_COUNT != '0' || env.REMOVED_COUNT != '0'
         env:
-          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}  # set this secret in repo settings
+          WEBHOOK_URL: ${{ secrets.REDDIT_DISCORD }}
         run: |
           set -euo pipefail
           NEW=$(cat results/$DOMAIN/new_endpoints.txt | wc -l || echo 0)
           REMOVED=$(cat results/$DOMAIN/removed_endpoints.txt | wc -l || echo 0)
-          # grab first few examples to include
           NEW_EXAMPLES=$(head -n 10 results/$DOMAIN/new_endpoints.txt | sed ':a;N;$!ba;s/\n/\\n/g' || echo "None")
           REMOVED_EXAMPLES=$(head -n 10 results/$DOMAIN/removed_endpoints.txt | sed ':a;N;$!ba;s/\n/\\n/g' || echo "None")
           PAYLOAD=$(jq -n \
@@ -262,5 +245,4 @@ jobs:
       - name: Cleanup (optional)
         if: always()
         run: |
-          # keep results/ and previous/ for artifact and commit; remove tmp
           rm -rf tmp || true
